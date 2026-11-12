@@ -1,0 +1,10 @@
+{
+  "name": "MellowDo",
+  "short_name": "MellowDo",
+  "description": "A gentle, guilt-free way to start the things you are putting off.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#7aa38f",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
