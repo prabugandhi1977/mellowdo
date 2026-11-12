@@ -1,0 +1,13 @@
+{
+  "name": "mellowdo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A gentle, guilt-free app for beating procrastination, for yourself and your community.",
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": { "node": ">=22.13" }
+}
