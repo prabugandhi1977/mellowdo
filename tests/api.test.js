@@ -90,3 +90,9 @@ test('community: create, join, commit, cheer, done, access control', async () =>
   assert.equal(g.commitments[0].done, true);
   assert.equal((await call('POST', `/api/commitments/${cid}/cheer`, null, c)).status, 404);
 });
+
+test('health check is public', async () => {
+  const r = await call('GET', '/api/health');
+  assert.equal(r.status, 200);
+  assert.equal(r.ok, true);
+});

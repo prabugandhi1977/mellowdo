@@ -54,6 +54,8 @@ export function createApi(db) {
       .all(t.id).map((s) => ({ ...s, done: !!s.done })),
   });
 
+  route('GET', '/api/health', false, () => ({ ok: true }));
+
   // ---- auth ----
   route('POST', '/api/register', false, ({ body }) => {
     const name = String(body.name || '').trim();

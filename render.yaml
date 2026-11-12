@@ -1,0 +1,14 @@
+# Render Blueprint: one Docker web service with a persistent disk for the SQLite database.
+# Persistent disks need a paid plan; the free plan would lose everyone's data on every restart.
+services:
+  - type: web
+    name: mellowdo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: mellowdo-data
+      mountPath: /data
+      sizeGB: 1

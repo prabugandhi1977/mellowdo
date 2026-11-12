@@ -32,3 +32,11 @@ tests/    api.test.js
 Push-notification reminders, LLM-powered breakdowns, sharing a group invite link, data export, hosted deploy (the repo root has a Dockerfile/render.yaml pattern you can copy).
 
 Note: auth is a name plus a short PIN, which suits a trusted community. Add email or OAuth sign-in before opening it to the public.
+
+## Deploy (Render)
+
+1. In Render choose **New → Blueprint**, connect this repo and select the branch with `render.yaml`.
+2. Approve the `starter` web service with a 1 GB disk (needed so accounts and groups survive restarts).
+3. When it is live, open the `onrender.com` URL on a phone and use "Add to Home Screen" to install the app.
+
+Back up the database by copying `/data/mellowdo.db` (for example with Render's shell). The Dockerfile also works on Fly.io, Railway or any VPS: mount a volume at `/data`.
