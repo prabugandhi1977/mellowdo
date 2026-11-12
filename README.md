@@ -31,12 +31,19 @@ tests/    api.test.js
 
 Push-notification reminders, LLM-powered breakdowns, sharing a group invite link, data export, hosted deploy (the repo root has a Dockerfile/render.yaml pattern you can copy).
 
-Note: auth is a name plus a short PIN, which suits a trusted community. Add email or OAuth sign-in before opening it to the public.
+
+## Sign-in
+
+Passwordless email codes: enter your email, get a 6-digit code (valid 10 minutes, 5 tries, 5 requests per hour), enter it. New accounts pick a display name. Sessions last 30 days and `Sign out` ends them immediately.
+
+- **Local dev:** with no `RESEND_API_KEY` the code is printed in the server log and pre-filled in the UI.
+- **Production:** set `RESEND_API_KEY`, `MAIL_FROM` and `AUTH_SECRET`; the server refuses to start in production without a key and secret.
+- Resend only delivers to arbitrary addresses from a domain you have verified; its `onboarding@resend.dev` test sender only reaches your own account email.
 
 ## Deploy (Render)
 
 1. In Render choose **New → Blueprint**, connect this repo and select the branch with `render.yaml`.
-2. Approve the `starter` web service with a 1 GB disk (needed so accounts and groups survive restarts).
+2. Approve the `starter` web service with a 1 GB disk (needed so accounts and groups survive restarts), and paste `RESEND_API_KEY` and `MAIL_FROM` when asked.
 3. When it is live, open the `onrender.com` URL on a phone and use "Add to Home Screen" to install the app.
 
 Back up the database by copying `/data/mellowdo.db` (for example with Render's shell). The Dockerfile also works on Fly.io, Railway or any VPS: mount a volume at `/data`.

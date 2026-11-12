@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { breakdown, REASONS } from './breakdown.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -9,9 +9,14 @@ class HttpError extends Error {
 }
 const bad = (m) => new HttpError(400, m);
 
-function hashPin(pin, salt) {
-  return scryptSync(pin, salt, 32).toString('hex');
-}
+const CODE_TTL_MS = 10 * 60 * 1000;
+const RESEND_AFTER_MS = 60 * 1000;
+const MAX_CODES_PER_HOUR = 5;
+const MAX_ATTEMPTS = 5;
+const SESSION_DAYS = 30;
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
+
+const normEmail = (e) => String(e || '').trim().toLowerCase();
 
 // Consecutive days (ending today or yesterday) that appear in `days`.
 export function streak(days) {
@@ -22,8 +27,9 @@ export function streak(days) {
   return n;
 }
 
-export function createApi(db) {
+export function createApi(db, { mailer, secret = process.env.AUTH_SECRET || 'dev-only-secret' } = {}) {
   const q = (sql) => db.prepare(sql);
+  const codeHash = (email, code) => createHmac('sha256', secret).update(`${email}:${code}`).digest('hex');
 
   const routes = [];
   const route = (method, pattern, auth, fn) => {
@@ -57,23 +63,60 @@ export function createApi(db) {
   route('GET', '/api/health', false, () => ({ ok: true }));
 
   // ---- auth ----
-  route('POST', '/api/register', false, ({ body }) => {
-    const name = String(body.name || '').trim();
-    const pin = String(body.pin || '');
-    if (name.length < 2 || name.length > 30) throw bad('Name must be 2-30 characters');
-    if (!/^\d{4,8}$/.test(pin)) throw bad('PIN must be 4-8 digits');
-    if (q('SELECT 1 FROM users WHERE name = ?').get(name)) throw new HttpError(409, 'That name is taken');
-    const salt = randomBytes(16).toString('hex');
-    const { lastInsertRowid } = q('INSERT INTO users (name, pin_hash, salt) VALUES (?, ?, ?)')
-      .run(name, hashPin(pin, salt), salt);
-    return { token: newSession(lastInsertRowid), user: { id: Number(lastInsertRowid), name } };
+  // Passwordless sign-in: request a 6-digit code by email, then verify it.
+  route('POST', '/api/auth/request', false, async ({ body }) => {
+    const email = normEmail(body.email);
+    if (!EMAIL_RE.test(email)) throw bad('Enter a valid email address');
+    const now = Date.now();
+    const recent = q('SELECT created_at FROM login_codes WHERE email = ? AND created_at > ? ORDER BY created_at DESC')
+      .all(email, now - 3600e3);
+    if (recent.length && now - recent[0].created_at < RESEND_AFTER_MS)
+      throw new HttpError(429, 'Please wait a minute before asking for another code');
+    if (recent.length >= MAX_CODES_PER_HOUR) throw new HttpError(429, 'Too many codes requested. Try again later');
+    const code = String(randomInt(0, 1e6)).padStart(6, '0');
+    // Old rows are kept for an hour: they are the history the throttle above counts. Only the newest row can verify.
+    q('DELETE FROM login_codes WHERE created_at < ?').run(now - 3600e3);
+    const { lastInsertRowid: codeId } = q('INSERT INTO login_codes (email, code_hash, expires_at, created_at) VALUES (?, ?, ?, ?)')
+      .run(email, codeHash(email, code), now + CODE_TTL_MS, now);
+    try {
+      await mailer.send({ to: email, subject: `Your MellowDo code: ${code}`,
+        text: `Your MellowDo sign-in code is ${code}. It expires in 10 minutes.\n\nIf you didn't ask for this, you can ignore this email.` });
+    } catch (e) {
+      console.error('mail failed:', e.message);
+      q('DELETE FROM login_codes WHERE id = ?').run(codeId); // a failed send must not burn the user's quota
+      throw new HttpError(502, 'Could not send the email. Please try again');
+    }
+    // Same answer whether or not the email has an account.
+    return { ok: true, ...(mailer.live ? {} : { dev_code: code }) };
   });
 
-  route('POST', '/api/login', false, ({ body }) => {
-    const u = q('SELECT * FROM users WHERE name = ?').get(String(body.name || '').trim());
-    const ok = u && timingSafeEqual(Buffer.from(hashPin(String(body.pin || ''), u.salt)), Buffer.from(u.pin_hash));
-    if (!ok) throw new HttpError(401, 'Wrong name or PIN');
-    return { token: newSession(u.id), user: { id: u.id, name: u.name } };
+  route('POST', '/api/auth/verify', false, ({ body }) => {
+    const email = normEmail(body.email);
+    const code = String(body.code || '').trim();
+    const row = q('SELECT * FROM login_codes WHERE email = ? ORDER BY created_at DESC LIMIT 1').get(email);
+    if (!row || row.expires_at < Date.now() || row.attempts >= MAX_ATTEMPTS)
+      throw new HttpError(401, 'That code has expired. Ask for a new one');
+    const given = Buffer.from(codeHash(email, code));
+    const want = Buffer.from(row.code_hash);
+    if (given.length !== want.length || !timingSafeEqual(given, want)) {
+      q('UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?').run(row.id);
+      throw new HttpError(401, 'That code is not right');
+    }
+    let user = q('SELECT id, name FROM users WHERE email = ?').get(email);
+    if (!user) {
+      const name = String(body.name || '').trim();
+      if (!name) return { needs_name: true }; // valid code, new account: ask for a display name, code stays usable
+      if (name.length < 2 || name.length > 30) throw bad('Name must be 2-30 characters');
+      const { lastInsertRowid } = q('INSERT INTO users (email, name) VALUES (?, ?)').run(email, name);
+      user = { id: Number(lastInsertRowid), name };
+    }
+    q('DELETE FROM login_codes WHERE email = ?').run(email);
+    return { token: newSession(user.id), user: { id: user.id, name: user.name } };
+  });
+
+  route('POST', '/api/logout', true, ({ headers }) => {
+    q('DELETE FROM sessions WHERE token = ?').run((headers.authorization || '').replace(/^Bearer /, ''));
+    return { ok: true };
   });
 
   route('GET', '/api/me', true, ({ user }) => ({ user: { id: user.id, name: user.name }, reasons: REASONS }));
@@ -233,11 +276,11 @@ export function createApi(db) {
         let user = null;
         if (r.auth) {
           const token = (headers.authorization || '').replace(/^Bearer /, '');
-          user = q(`SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`).get(token);
+          user = q(`SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.created_at > datetime('now', '-${SESSION_DAYS} days')`).get(token);
           if (!user) throw new HttpError(401, 'Please sign in');
         }
         const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
-        return { status: 200, json: r.fn({ user, params, body }) };
+        return { status: 200, json: await r.fn({ user, params, body, headers }) };
       } catch (e) {
         if (e instanceof HttpError) return { status: e.status, json: { error: e.message } };
         console.error(e);

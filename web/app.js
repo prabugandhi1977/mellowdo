@@ -35,31 +35,52 @@ function toast(msg) {
 const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message); } };
 
 function signOut() {
+  if (token) fetch('/api/logout', { method: 'POST', headers: { authorization: `Bearer ${token}` } }).catch(() => {});
   localStorage.removeItem('md_token');
   token = null; me = null;
   render();
 }
 
 // ---------- views ----------
+let authState = { step: 'email', email: '', needsName: false, devCode: null };
+
 function authView() {
+  const a = authState;
   $app.innerHTML = `
     <h1>MellowDo</h1>
-    <p class="muted">Start small. No guilt. Pick a name and a short PIN to begin.</p>
+    <p class="muted">Start small. No guilt. ${a.step === 'email' ? 'Enter your email and we will send you a sign-in code. No password needed.' : `We sent a 6-digit code to <b>${esc(a.email)}</b>. It expires in 10 minutes.`}</p>
     <form class="card" id="auth">
-      <label>Name <input name="name" autocomplete="username" required minlength="2" maxlength="30"></label>
-      <label>PIN (4-8 digits) <input name="pin" type="password" inputmode="numeric" autocomplete="current-password" pattern="\\d{4,8}" required></label>
-      <p class="err" id="err"></p>
-      <div class="row"><button type="submit" data-mode="register">Create account</button><button type="submit" class="ghost" data-mode="login">Sign in</button></div>
+      ${a.step === 'email' ? `
+        <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320" value="${esc(a.email)}"></label>`
+      : `
+        <label>6-digit code <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="\\d{6}" maxlength="6" required value="${esc(a.prefill || a.devCode || '')}"></label>
+        ${a.devCode ? '<p class="muted">Dev mode: email is not configured, so the code is filled in for you.</p>' : ''}
+        ${a.needsName ? '<label>What should we call you? <input name="name" autocomplete="nickname" required minlength="2" maxlength="30"></label>' : ''}`}
+      <p class="err" id="err" role="alert"></p>
+      <div class="row">
+        <button type="submit">${a.step === 'email' ? 'Send code' : (a.needsName ? 'Create account' : 'Sign in')}</button>
+        ${a.step === 'code' ? '<button type="button" class="ghost" id="back">Use another email</button>' : ''}
+      </div>
     </form>`;
+  const err = (m) => { document.getElementById('err').textContent = m; };
+  document.getElementById('back')?.addEventListener('click', () => { authState = { step: 'email', email: a.email, needsName: false, devCode: null }; authView(); });
   document.getElementById('auth').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const mode = e.submitter?.dataset.mode || 'login';
     const f = new FormData(e.target);
+    const btn = e.submitter; btn.disabled = true;
     try {
-      const r = await api('POST', '/' + mode, { name: f.get('name'), pin: f.get('pin') });
+      if (a.step === 'email') {
+        const email = String(f.get('email')).trim();
+        const r = await api('POST', '/auth/request', { email });
+        authState = { step: 'code', email, needsName: false, devCode: r.dev_code || null };
+        return authView();
+      }
+      const r = await api('POST', '/auth/verify', { email: a.email, code: f.get('code'), name: f.get('name') || undefined });
+      if (r.needs_name) { authState = { ...a, needsName: true, prefill: String(f.get('code')) }; return authView(); }
       token = r.token; localStorage.setItem('md_token', token);
+      authState = { step: 'email', email: '', needsName: false, devCode: null };
       await boot();
-    } catch (err) { document.getElementById('err').textContent = err.message; }
+    } catch (er) { err(er.message); btn.disabled = false; }
   });
 }
 

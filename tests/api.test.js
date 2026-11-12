@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { openDb } from '../server/db.js';
 import { createApp } from '../server/server.js';
 
-let server, base;
+let server, base, db;
+const outbox = [];
+const mailer = { live: true, async send(m) { outbox.push(m); } };
 before(async () => {
-  server = createApp(openDb(':memory:'));
+  db = openDb(':memory:');
+  server = createApp(db, { mailer, secret: 'test-secret' });
   await new Promise((r) => server.listen(0, r));
   base = `http://localhost:${server.address().port}`;
 });
@@ -19,15 +22,78 @@ async function call(method, path, body, token) {
   });
   return { status: res.status, ...(await res.json()) };
 }
-const signup = async (name) => (await call('POST', '/api/register', { name, pin: '1234' })).token;
+const lastCode = (email) => outbox.filter((m) => m.to === email).at(-1).text.match(/\b(\d{6})\b/)[1];
+const emailFor = (name) => `${name.toLowerCase()}@example.com`;
+async function signup(name) {
+  const email = emailFor(name);
+  assert.equal((await call('POST', '/api/auth/request', { email })).status, 200);
+  const r = await call('POST', '/api/auth/verify', { email, code: lastCode(email), name });
+  assert.ok(r.token, JSON.stringify(r));
+  return r.token;
+}
 
-test('register, duplicate name, login, bad pin', async () => {
-  assert.ok(await signup('Asha'));
-  assert.equal((await call('POST', '/api/register', { name: 'asha', pin: '1234' })).status, 409);
-  assert.equal((await call('POST', '/api/register', { name: 'Bo', pin: 'abc' })).status, 400);
-  assert.equal((await call('POST', '/api/login', { name: 'Asha', pin: '0000' })).status, 401);
-  assert.ok((await call('POST', '/api/login', { name: 'Asha', pin: '1234' })).token);
-  assert.equal((await call('GET', '/api/me')).status, 401);
+test('email sign-in: new account, returning user, case-insensitive email', async () => {
+  const email = 'Asha@Example.com';
+  const req = await call('POST', '/api/auth/request', { email });
+  assert.equal(req.status, 200);
+  assert.equal(req.dev_code, undefined); // live mailer never leaks the code
+  const code = lastCode('asha@example.com');
+  assert.equal((await call('POST', '/api/auth/verify', { email, code })).needs_name, true);
+  const first = await call('POST', '/api/auth/verify', { email, code, name: 'Asha' });
+  assert.ok(first.token);
+  assert.equal((await call('GET', '/api/me', null, first.token)).user.name, 'Asha');
+  // code is single-use
+  assert.equal((await call('POST', '/api/auth/verify', { email, code, name: 'Asha' })).status, 401);
+  // returning user signs in without a name, keeping the same account
+  db.prepare('UPDATE login_codes SET created_at = created_at - 120000').run();
+  await call('POST', '/api/auth/request', { email: 'asha@example.com' });
+  const again = await call('POST', '/api/auth/verify', { email: 'asha@example.com', code: lastCode('asha@example.com') });
+  assert.equal(again.user.id, first.user.id);
+});
+
+test('email sign-in rejects bad email, wrong code, expired code, and locks after 5 wrong tries', async () => {
+  assert.equal((await call('POST', '/api/auth/request', { email: 'nope' })).status, 400);
+  const email = 'lock@example.com';
+  await call('POST', '/api/auth/request', { email });
+  const good = lastCode(email);
+  const wrong = good === '000000' ? '111111' : '000000';
+  for (let i = 0; i < 5; i++) assert.equal((await call('POST', '/api/auth/verify', { email, code: wrong, name: 'Lock' })).status, 401);
+  // even the right code is refused once attempts are used up
+  assert.equal((await call('POST', '/api/auth/verify', { email, code: good, name: 'Lock' })).status, 401);
+  assert.equal((await call('POST', '/api/auth/verify', { email: 'ghost@example.com', code: '123456' })).status, 401);
+  db.prepare("UPDATE login_codes SET expires_at = 0 WHERE email = 'lock@example.com'").run();
+  assert.equal((await call('POST', '/api/auth/verify', { email, code: good, name: 'Lock' })).status, 401);
+});
+
+test('email sign-in throttles code requests and does not burn quota on mail failure', async () => {
+  const email = 'rate@example.com';
+  assert.equal((await call('POST', '/api/auth/request', { email })).status, 200);
+  assert.equal((await call('POST', '/api/auth/request', { email })).status, 429); // 1-minute cooldown
+  for (let i = 0; i < 4; i++) {
+    db.prepare('UPDATE login_codes SET created_at = created_at - 61000 WHERE email = ?').run(email);
+    assert.equal((await call('POST', '/api/auth/request', { email })).status, 200);
+  }
+  db.prepare('UPDATE login_codes SET created_at = created_at - 61000 WHERE email = ?').run(email);
+  const r = await call('POST', '/api/auth/request', { email });
+  assert.equal(r.status, 429);
+  assert.match(r.error, /Too many/);
+  // failed send: user sees an error and may retry immediately
+  const orig = mailer.send;
+  mailer.send = async () => { throw new Error('provider down'); };
+  const f = await call('POST', '/api/auth/request', { email: 'down@example.com' });
+  mailer.send = orig;
+  assert.equal(f.status, 502);
+  assert.equal((await call('POST', '/api/auth/request', { email: 'down@example.com' })).status, 200);
+});
+
+test('sessions: logout invalidates the token, old sessions expire', async () => {
+  const t = await signup('Zed');
+  assert.equal((await call('GET', '/api/me', null, t)).status, 200);
+  await call('POST', '/api/logout', null, t);
+  assert.equal((await call('GET', '/api/me', null, t)).status, 401);
+  const t2 = await signup('Zed2');
+  db.prepare("UPDATE sessions SET created_at = datetime('now', '-31 days') WHERE token = ?").run(t2);
+  assert.equal((await call('GET', '/api/me', null, t2)).status, 401);
 });
 
 test('task breakdown starts tiny and completes when all steps are done', async () => {

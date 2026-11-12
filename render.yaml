@@ -12,3 +12,11 @@ services:
       name: mellowdo-data
       mountPath: /data
       sizeGB: 1
+    envVars:
+      - key: AUTH_SECRET
+        generateValue: true
+      # Sign-in codes are emailed through Resend (https://resend.com). Paste these in the Render dashboard.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false   # e.g. MellowDo <login@yourdomain.com>, on a domain verified in Resend

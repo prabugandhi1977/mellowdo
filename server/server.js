@@ -4,6 +4,7 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
 import { createApi } from './app.js';
+import { createMailer } from './mailer.js';
 
 const WEB = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'web');
 const TYPES = {
@@ -11,8 +12,8 @@ const TYPES = {
   '.json': 'application/json', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json',
 };
 
-export function createApp(db = openDb()) {
-  const api = createApi(db);
+export function createApp(db = openDb(), opts = {}) {
+  const api = createApi(db, { mailer: createMailer(), ...opts });
   return createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     if (url.pathname.startsWith('/api/')) {
@@ -47,5 +48,9 @@ export function createApp(db = openDb()) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = process.env.PORT || 3300;
+  if (process.env.NODE_ENV === 'production' && (!process.env.RESEND_API_KEY || !process.env.AUTH_SECRET)) {
+    console.error('Production needs RESEND_API_KEY (to email sign-in codes) and AUTH_SECRET (any long random string).');
+    process.exit(1);
+  }
   createApp().listen(port, () => console.log(`MellowDo running on http://localhost:${port}`));
 }
